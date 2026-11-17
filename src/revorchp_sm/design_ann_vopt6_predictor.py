@@ -13,6 +13,8 @@ import joblib
 import numpy as np
 import pandas as pd
 
+from . import bundled_model_path
+
 SMALL = 1.0e-12
 DUAL_STAGE_DESIGN_PRESSURE_RATIO_THRESHOLD = 8.0
 
@@ -192,7 +194,7 @@ class DesignANNModule:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Predict a corrected nominal 10 kg/s reversible-module design.")
-    p.add_argument("--model", default=str(Path(__file__).parent/"models"/"design_ann_vopt6_module.joblib"))
+    p.add_argument("--model", default=str(bundled_model_path("design_ann_vopt6_module.joblib")))
     group = p.add_mutually_exclusive_group(required=True)
     group.add_argument("--target-load-W", type=float)
     group.add_argument("--target-load-mw", type=float)

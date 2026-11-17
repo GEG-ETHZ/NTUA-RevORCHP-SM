@@ -16,15 +16,18 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 DATA = Path(__file__).resolve().parent / "data"
-sys.path.insert(0, str(REPO))
+try:
+    import revorchp_sm  # noqa: F401  (installed with pip: test the installed copy)
+except ImportError:
+    sys.path.insert(0, str(REPO / "src"))  # not installed: test the code in src/
 
-from design_ann_vopt6_predictor import DesignANNModule, json_default  # noqa: E402
-from hp_offdesign_surrogate_1mw_filtered_variants_vopt6 import predict_1mw_hp_performance  # noqa: E402
-from orc_offdesign_surrogate_filtered_variants_vopt6 import (  # noqa: E402
+from revorchp_sm.design_ann_vopt6_predictor import DesignANNModule, json_default  # noqa: E402
+from revorchp_sm.hp_offdesign_surrogate_1mw_filtered_variants_vopt6 import predict_1mw_hp_performance  # noqa: E402
+from revorchp_sm.orc_offdesign_surrogate_filtered_variants_vopt6 import (  # noqa: E402
     predict_1mw_orc_performance,
     predict_orc_performance_for_design,
 )
-from reversible_design_ann_vopt6_wrapper import ReversibleDesignANN  # noqa: E402
+from revorchp_sm.reversible_design_ann_vopt6_wrapper import ReversibleDesignANN  # noqa: E402
 
 # Tolerances used to compare numbers with the stored reference values.
 RTOL = 1e-9

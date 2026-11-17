@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from . import bundled_model_path
 from .design_ann_vopt6_predictor import DesignANNModule, json_default
 
 
@@ -278,7 +279,7 @@ class ReversibleDesignANN:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="HP- and ORC-priority wrapper for the design ANN.")
-    parser.add_argument("--model", default="./models/design_ann_vopt6_module.joblib")
+    parser.add_argument("--model", default=str(bundled_model_path("design_ann_vopt6_module.joblib")))
     sub = parser.add_subparsers(dest="priority", required=True)
 
     hp = sub.add_parser("hp", help="HP-priority design")

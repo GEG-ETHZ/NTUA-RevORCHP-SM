@@ -1,0 +1,67 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "revorchp-sm"
+dynamic = ["version"]
+description = "Surrogate models for reversible organic Rankine cycle and heat-pump systems using R1234ze(E)."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Tryfon Roumpedakis" },
+    { name = "Andreas Nikoglou" },
+    { name = "Sotirios Karellas" },
+]
+requires-python = ">=3.11"
+# requirements.txt keeps the exact, tested environment. The ranges below are
+# what pip may choose when this package is installed next to other software.
+dependencies = [
+    # The .joblib model files are pickled scikit-learn objects. scikit-learn
+    # only guarantees that a pickle loads and predicts identically with the
+    # version that wrote it, so this pin must match the version used for
+    # training. Change it only together with retrained/re-saved models.
+    "scikit-learn==1.8.0",
+    # numpy 2 or newer: the pickles refer to numpy._core, which numpy 1 lacks.
+    "numpy>=2",
+    # The oldest versions below were checked to reproduce tests/data exactly.
+    "scipy>=1.13",
+    "pandas>=2.2.2",
+    "joblib>=1.3",
+    "threadpoolctl>=3.2",
+]
+
+[project.urls]
+Repository = "https://github.com/trx09009/RevORCHP-SM-1.0.2"
+
+# The same three commands as in README.md, available on the PATH after
+# installing (e.g. `revorchp-sm-hp-offdesign --help`).
+[project.scripts]
+revorchp-sm-design = "revorchp_sm.reversible_design_ann_vopt6_wrapper:main"
+revorchp-sm-hp-offdesign = "revorchp_sm.hp_offdesign_surrogate_1mw_filtered_variants_vopt6:main"
+revorchp-sm-orc-offdesign = "revorchp_sm.orc_offdesign_surrogate_filtered_variants_vopt6:main"
+
+[tool.hatch.version]
+path = "src/revorchp_sm/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/revorchp_sm"]
+
+# The model files stay in the top-level models/ folder (so the README commands
+# keep working unchanged) and are copied into the installed package as
+# revorchp_sm/models/.
+[tool.hatch.build.targets.wheel.force-include]
+"models" = "revorchp_sm/models"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/models",
+    "/tests",
+    "/*.py",
+    "README.md",
+    "LICENSE",
+    "CITATION.cff",
+    "requirements*.txt",
+]
