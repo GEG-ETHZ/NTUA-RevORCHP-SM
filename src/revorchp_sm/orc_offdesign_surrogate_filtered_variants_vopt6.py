@@ -9,7 +9,7 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
-from bundle_io import load_bundle, predict_model
+from .bundle_io import load_bundle, predict_model
 
 
 SMALL = 1.0e-12

@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from design_ann_vopt6_predictor import DesignANNModule, json_default
+from .design_ann_vopt6_predictor import DesignANNModule, json_default
 
 
 EXTENSIVE_OUTPUTS = {
