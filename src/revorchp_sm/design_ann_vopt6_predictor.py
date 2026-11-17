@@ -3,6 +3,17 @@
 
 The projection enforces declared balances; it is not a thermodynamic solver.
 Runtime dependencies are limited to the packaged NumPy/pandas/sklearn stack.
+
+The module sizes one reversible ORC / heat-pump module at the nominal brine
+flow stored in the bundle (10 kg/s for ``models/design_ann_vopt6_module.joblib``).
+Main entry point: :class:`DesignANNModule`. The command line is described in
+README.md; ``reversible_design_ann_vopt6_wrapper`` builds plant-level designs
+from several modules.
+
+Declared design domain (README.md; also stored in the bundle as
+``input_bounds``): ``target_load_W`` 500000–1e6, ``avg_T_amb_C`` -10–20,
+``T_brine_in_C`` 95–115, ``p_brine_bar`` 12–24, ``T_brine_out_min_C`` 60–75.
+Inputs outside it are still evaluated and reported in ``warnings``.
 """
 from __future__ import annotations
 import argparse
@@ -20,6 +31,12 @@ DUAL_STAGE_DESIGN_PRESSURE_RATIO_THRESHOLD = 8.0
 
 
 def json_default(obj: Any) -> Any:
+    """Convert NumPy scalars/arrays and paths so ``json.dumps`` can write them.
+
+    Used as ``json.dumps(result, default=json_default)``. NumPy integers,
+    floats and booleans become Python ``int``/``float``/``bool``, arrays
+    become lists, and anything else becomes ``str(obj)``.
+    """
     if isinstance(obj, np.integer): return int(obj)
     if isinstance(obj, np.floating): return float(obj)
     if isinstance(obj, np.bool_): return bool(obj)
@@ -29,7 +46,26 @@ def json_default(obj: Any) -> Any:
 
 
 def brine_enthalpy(table: dict, pressure_bar, temperature_C) -> np.ndarray:
-    """Reference bilinear PT interpolation and its linear extrapolation."""
+    """Reference bilinear PT interpolation and its linear extrapolation.
+
+    Parameters
+    ----------
+    table : dict
+        Brine enthalpy table from the bundle (``brine_enthalpy_table``) with
+        keys ``"p_bar"`` (pressure grid, bar), ``"T_K"`` (temperature grid, K)
+        and ``"h_J_kg"`` (specific enthalpy in J/kg, indexed ``[p, T]``).
+    pressure_bar : float or array_like
+        Brine pressure, bar.
+    temperature_C : float or array_like
+        Brine temperature, °C (converted to K internally).
+
+    Returns
+    -------
+    numpy.ndarray
+        Specific enthalpy, J/kg, with the broadcast shape of the inputs.
+        Points outside the table grid are extrapolated linearly from the
+        nearest grid cell; no error is raised.
+    """
     p, t = np.broadcast_arrays(np.asarray(pressure_bar, float), np.asarray(temperature_C, float)+273.15)
     pg, tg, values = (np.asarray(table[k], float) for k in ("p_bar", "T_K", "h_J_kg"))
     i = np.clip(np.searchsorted(pg, p)-1, 0, len(pg)-2)
@@ -40,7 +76,28 @@ def brine_enthalpy(table: dict, pressure_bar, temperature_C) -> np.ndarray:
 
 
 def saturation_pressure(approx: dict, temperature_C) -> np.ndarray:
-    """Bounded log-pressure Chebyshev approximation fitted to CoolProp."""
+    """Bounded log-pressure Chebyshev approximation fitted to CoolProp.
+
+    Parameters
+    ----------
+    approx : dict
+        Approximation from the bundle (``saturation_pressure_approximation``)
+        with keys ``"domain_C"`` (``[T_min, T_max]`` in °C) and
+        ``"log_bar_coefficients"`` (Chebyshev coefficients of ln(p / bar)).
+        The shipped bundle is for R1234ze(E) on -5 to 108 °C.
+    temperature_C : float or array_like
+        Saturation temperature, °C.
+
+    Returns
+    -------
+    numpy.ndarray
+        Saturation pressure, bar.
+
+    Raises
+    ------
+    ValueError
+        If any temperature is not finite or lies outside ``domain_C``.
+    """
     t = np.asarray(temperature_C, float)
     lo, hi = map(float, approx["domain_C"])
     if np.any(~np.isfinite(t)) or np.any(t < lo-1e-9) or np.any(t > hi+1e-9):
@@ -49,7 +106,47 @@ def saturation_pressure(approx: dict, temperature_C) -> np.ndarray:
 
 
 class DesignANNModule:
-    def __init__(self, model_path: str | Path):
+    """Nominal design surrogate for one reversible ORC / heat-pump module.
+
+    Neural-network experts (one per ORC expander stage count) predict the
+    learned design quantities; :meth:`predict_frame` then projects them onto
+    the brine source capacity and the declared energy balances. The module is
+    always sized for the bundle's nominal brine flow (10 kg/s).
+
+    Parameters
+    ----------
+    model_path : str or pathlib.Path
+        Path to the design bundle, normally
+        ``models/design_ann_vopt6_module.joblib``.
+
+    Attributes
+    ----------
+    bundle : dict
+        The loaded bundle.
+    base_inputs : list of str
+        Input columns: ``target_load_W``, ``avg_T_amb_C``, ``T_brine_in_C``,
+        ``p_brine_bar``, ``T_brine_out_min_C``.
+    nominal_flow : float
+        Nominal module brine flow, kg/s.
+    hp_drop : float
+        Fixed difference between the ANN brine inlet temperature and the HP
+        brine inlet temperature, K (40 K in the shipped bundle; README:
+        ``T_brine_in_HP_C = T_brine_in_ANN_C - 40``).
+    hp_out_min : float
+        HP design minimum brine outlet temperature, °C (45 °C in the shipped
+        bundle).
+    constants : dict
+        Fixed constants from the bundle, e.g. ``eta_generator``,
+        ``eta_pump_motor``, ``common_hex_U_W_m2K``, ``acc_U_W_m2K`` and
+        ``orc_cond_ambient_offset_K``.
+
+    Raises
+    ------
+    ValueError
+        If the bundle's ``schema_version`` is not ``"corrected_design_ann_v1"``.
+    """
+
+    def __init__(self, model_path: str | Path) -> None:
         self.model_path = Path(model_path).resolve()
         self.bundle = joblib.load(self.model_path)
         if self.bundle.get("schema_version") != "corrected_design_ann_v1":
@@ -64,6 +161,21 @@ class DesignANNModule:
         self.constants = dict(self.bundle["constants"])
 
     def build_features(self, base: pd.DataFrame) -> pd.DataFrame:
+        """Add the derived input features used by the networks.
+
+        Parameters
+        ----------
+        base : pandas.DataFrame
+            One row per design case with the columns in ``base_inputs``.
+
+        Returns
+        -------
+        pandas.DataFrame
+            The columns listed in the bundle's ``feature_columns``: the base
+            inputs plus ``source_deltaT_available_K``,
+            ``source_capacity_to_target_ratio``, ``brine_in_minus_ambient_K``
+            and ``brine_out_min_minus_ambient_K``.
+        """
         out = base[self.base_inputs].astype(float).copy()
         out["source_deltaT_available_K"] = out.T_brine_in_C-out.T_brine_out_min_C
         out["source_capacity_to_target_ratio"] = 4180.*self.nominal_flow*out.source_deltaT_available_K/out.target_load_W.clip(lower=SMALL)
@@ -72,6 +184,20 @@ class DesignANNModule:
         return out[self.feature_columns]
 
     def domain_warnings(self, row: pd.Series) -> list[str]:
+        """List inputs outside the declared design domain.
+
+        Parameters
+        ----------
+        row : pandas.Series
+            One design case, indexed by the input column names.
+
+        Returns
+        -------
+        list of str
+            One message per input outside the bundle's ``input_bounds``,
+            followed by a fixed note that the predicted geometry is nominal
+            sizing. The list is therefore never empty.
+        """
         messages = []
         for col, lim in self.bundle["input_bounds"].items():
             value, lo, hi = float(row[col]), float(lim["min"]), float(lim["max"])
@@ -81,6 +207,12 @@ class DesignANNModule:
         return messages
 
     def _base(self, base: pd.DataFrame) -> pd.DataFrame:
+        """Select and check the input columns.
+
+        Raises ``KeyError`` if a column is missing and ``ValueError`` if an
+        input is not finite, ``target_load_W <= 0``, or the HP brine inlet
+        (``T_brine_in_C - hp_drop``) is not above ``hp_out_min``.
+        """
         missing = [c for c in self.base_inputs if c not in base]
         if missing: raise KeyError(f"Missing ANN input columns: {missing}")
         result = base[self.base_inputs].astype(float).reset_index(drop=True)
@@ -91,6 +223,15 @@ class DesignANNModule:
         return result
 
     def _routing(self, base: pd.DataFrame) -> dict[str, np.ndarray]:
+        """ORC design temperatures, pressures and expander stage count.
+
+        As coded: ``orc_T_evap_C = T_brine_in_C - 10``, ``orc_T_cond_C =
+        avg_T_amb_C + constants["orc_cond_ambient_offset_K"]``, pressures are
+        the saturation pressures at these temperatures, and
+        ``orc_expander_stage_count`` is 2 if ``orc_p_evap_bar / orc_p_cond_bar
+        > 8`` and 1 otherwise. The stage count selects which network expert is
+        used.
+        """
         te = base.T_brine_in_C.to_numpy()-10.
         tc = base.avg_T_amb_C.to_numpy()+float(self.constants["orc_cond_ambient_offset_K"])
         approx = self.bundle["saturation_pressure_approximation"]
@@ -101,7 +242,25 @@ class DesignANNModule:
                 "orc_expander_stage_count": np.where(ratio > 8., 2, 1)}
 
     def predict_raw_frame(self, base: pd.DataFrame) -> pd.DataFrame:
-        """Learned positive quantities before projection, provided for auditing."""
+        """Learned positive quantities before projection, provided for auditing.
+
+        Parameters
+        ----------
+        base : pandas.DataFrame
+            One row per design case with the columns in ``base_inputs``.
+
+        Returns
+        -------
+        pandas.DataFrame
+            The bundle's ``learned_output_columns`` as predicted by the
+            network expert for each row's stage count, before
+            :meth:`predict_frame` applies the source and energy constraints.
+
+        Raises
+        ------
+        KeyError, ValueError
+            As for :meth:`predict_frame`.
+        """
         base = self._base(base)
         route, features = self._routing(base), self.build_features(base)
         out = pd.DataFrame(0., index=base.index, columns=self.learned_outputs)
@@ -119,6 +278,17 @@ class DesignANNModule:
         return out
 
     def _reconstruct(self, base: pd.DataFrame, learned: pd.DataFrame) -> pd.DataFrame:
+        """Project learned outputs onto source capacity and energy balances.
+
+        HP side: heat and compressor power are scaled down together if the
+        source heat (``hp_Q_cond_W - hp_W_comp_W``) exceeds what the nominal
+        brine flow can give between the HP inlet and ``hp_out_min``; the HP
+        brine outlet temperature is found by bisection on the brine enthalpy
+        table. ORC side: the extensive ORC outputs are scaled by the same kind
+        of source-capacity factor, and net power, rejected heat and
+        efficiencies are recomputed from the balances. Returns the bundle's
+        ``report_output_columns``.
+        """
         out = learned.copy()
         target, pressure, tin = (base[c].to_numpy() for c in ("target_load_W", "p_brine_bar", "T_brine_in_C"))
         table = self.bundle["brine_enthalpy_table"]
@@ -181,11 +351,77 @@ class DesignANNModule:
         return out[self.report_outputs]
 
     def predict_frame(self, base: pd.DataFrame) -> pd.DataFrame:
+        """Predict nominal module designs for several cases at once.
+
+        Parameters
+        ----------
+        base : pandas.DataFrame
+            One row per design case with columns ``target_load_W`` (HP design
+            heating load, W), ``avg_T_amb_C`` (mean ambient temperature, °C),
+            ``T_brine_in_C`` (ANN brine inlet temperature, °C; the HP sees
+            this minus ``hp_drop``), ``p_brine_bar`` (brine pressure, bar) and
+            ``T_brine_out_min_C`` (minimum ORC brine outlet temperature, °C).
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per case with the bundle's ``report_output_columns``.
+            Column names end in their unit (``_W``, ``_C``, ``_bar``,
+            ``_kg_s``, ``_m3rev``, ``_m2``, ``_W_K``). Frequently used ones:
+
+            - ``hp_Q_cond_W``, ``hp_W_comp_W``, ``hp_COP_heating``,
+              ``hp_unmet_load_W``, ``hp_load_coverage_fraction``
+            - ``hp_V_s_comp_m3rev`` (compressor displacement)
+            - ``orc_Q_in_W``, ``orc_P_gross_W``, ``orc_P_net_W``,
+              ``orc_Q_rej_W``, ``orc_eta_net``
+            - ``orc_expander_stage_count``, ``orc_design_pressure_ratio``,
+              ``orc_V_s_exp_stage1_m3rev``, ``orc_V_s_exp_stage2_m3rev``
+            - ``common_hex_area_req_m2``, ``acc_area_req_m2``
+            - ``*_residual_W``: balance residuals (round-off around zero)
+
+        Raises
+        ------
+        KeyError
+            If an input column is missing.
+        ValueError
+            If an input is not finite, ``target_load_W <= 0``, the HP brine
+            inlet (``T_brine_in_C - hp_drop``) is not above ``hp_out_min``, or
+            an ORC/HP saturation temperature falls outside the saturation
+            pressure approximation's range.
+        """
         base = self._base(base)
         return self._reconstruct(base, self.predict_raw_frame(base))
 
     def predict_one(self, *, target_load_W: float, avg_T_amb_C: float, T_brine_in_C: float,
                     p_brine_bar: float, T_brine_out_min_C: float) -> dict[str, Any]:
+        """Predict the nominal design of one module for one case.
+
+        Parameters
+        ----------
+        target_load_W : float
+            HP design heating load, W (declared domain 500000–1e6).
+        avg_T_amb_C : float
+            Mean ambient temperature, °C (declared domain -10–20).
+        T_brine_in_C : float
+            ANN brine inlet temperature, °C (declared domain 95–115). The HP
+            design uses ``T_brine_in_C - hp_drop``.
+        p_brine_bar : float
+            Brine pressure, absolute bar (declared domain 12–24).
+        T_brine_out_min_C : float
+            Minimum ORC brine outlet temperature, °C (declared domain 60–75).
+
+        Returns
+        -------
+        dict
+            ``"inputs"``: the inputs as a dict; ``"module_design"``: one row
+            of :meth:`predict_frame` as a dict; ``"warnings"``: list of str
+            from :meth:`domain_warnings`.
+
+        Raises
+        ------
+        KeyError, ValueError
+            As for :meth:`predict_frame`.
+        """
         base = pd.DataFrame([dict(target_load_W=float(target_load_W), avg_T_amb_C=float(avg_T_amb_C),
             T_brine_in_C=float(T_brine_in_C), p_brine_bar=float(p_brine_bar), T_brine_out_min_C=float(T_brine_out_min_C))])
         pred = self.predict_frame(base).iloc[0]
@@ -193,6 +429,7 @@ class DesignANNModule:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Command-line options of this module (see ``--help``)."""
     p = argparse.ArgumentParser(description="Predict a corrected nominal 10 kg/s reversible-module design.")
     p.add_argument("--model", default=str(bundled_model_path("design_ann_vopt6_module.joblib")))
     group = p.add_mutually_exclusive_group(required=True)
@@ -206,6 +443,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Run one design prediction from the command line and print it as JSON."""
     args = build_parser().parse_args()
     target = args.target_load_W if args.target_load_W is not None else args.target_load_mw*1e6
     result = DesignANNModule(args.model).predict_one(target_load_W=target, avg_T_amb_C=args.avg_T_amb_c,

@@ -1,4 +1,23 @@
 #!/usr/bin/env python3
+"""HP-priority and ORC-priority plant design from identical nominal modules.
+
+The design ANN (:class:`~revorchp_sm.design_ann_vopt6_predictor.DesignANNModule`)
+sizes one module at the nominal 10 kg/s brine flow. This module decides how
+many identical modules a plant needs and which HP design load each module gets:
+
+- HP priority (:meth:`ReversibleDesignANN.hp_priority`): the total heating
+  load is shared equally between the modules.
+- ORC priority (:meth:`ReversibleDesignANN.orc_priority`): the HP design load
+  per module is searched over the supported 0.5–1.0 MW interval to maximise
+  ORC power.
+
+Plant totals are obtained by multiplying the outputs listed in
+``EXTENSIVE_OUTPUTS`` (heat, power, mass flow, displacement, area, UA and
+balance residuals) by the module count; temperatures,
+pressures and efficiencies are not scaled (README: "Identical modules may be
+aggregated by summing heat, power and mass flows; temperatures, pressures and
+efficiencies remain intensive").
+"""
 from __future__ import annotations
 
 import argparse
@@ -52,6 +71,23 @@ EXTENSIVE_OUTPUTS = {
 
 
 def scale_installed_outputs(module: dict[str, Any], module_count: int) -> dict[str, Any]:
+    """Plant totals from the design of one module.
+
+    Parameters
+    ----------
+    module : dict
+        Per-module design outputs (``"module_design"`` of
+        ``DesignANNModule.predict_one``).
+    module_count : int
+        Number of identical modules.
+
+    Returns
+    -------
+    dict
+        Same keys as ``module``. Keys listed in ``EXTENSIVE_OUTPUTS`` are
+        multiplied by ``module_count``; other numbers are copied unchanged as
+        ``float``; booleans stay booleans; anything else is copied unchanged.
+    """
     total: dict[str, Any] = {}
     for key, value in module.items():
         if isinstance(value, (bool, np.bool_)):
@@ -64,7 +100,26 @@ def scale_installed_outputs(module: dict[str, Any], module_count: int) -> dict[s
 
 
 class ReversibleDesignANN:
-    def __init__(self, model_path: str | Path):
+    """Plant-level design built from identical nominal design-ANN modules.
+
+    Parameters
+    ----------
+    model_path : str or pathlib.Path
+        Path to the design bundle, normally
+        ``models/design_ann_vopt6_module.joblib``.
+
+    Attributes
+    ----------
+    module : DesignANNModule
+        The single-module design surrogate.
+    nominal_flow : float
+        Nominal brine flow per module, kg/s (10 kg/s).
+    target_min_W, target_max_W : float
+        Supported HP design load per module, W (bundle ``input_bounds`` of
+        ``target_load_W``: 500000 and 1e6).
+    """
+
+    def __init__(self, model_path: str | Path) -> None:
         self.module = DesignANNModule(model_path)
         self.nominal_flow = self.module.nominal_flow
         bounds = self.module.bundle["input_bounds"]["target_load_W"]
@@ -81,6 +136,48 @@ class ReversibleDesignANN:
         p_brine_bar: float,
         T_brine_out_min_ORC_C: float,
     ) -> dict[str, Any]:
+        """HP-priority design: share the plant heating load between modules.
+
+        The module count is the larger of ``ceil(total_brine_flow_kg_s /
+        nominal_flow)`` and ``ceil(total_heating_load_W / target_max_W)``
+        (at least 1). Each module is sized for ``total_heating_load_W /
+        module_count``, clipped to ``[target_min_W, target_max_W]``.
+
+        Parameters
+        ----------
+        total_heating_load_W : float
+            Plant heating load, W. Must be positive.
+        total_brine_flow_kg_s : float
+            Plant brine flow, kg/s. Must be positive.
+        T_brine_in_HP_C : float
+            HP brine inlet temperature, °C. The design ANN is called with
+            ``T_brine_in_HP_C + hp_drop`` (40 K; README:
+            ``T_brine_in_HP_C = T_brine_in_ANN_C - 40``).
+        avg_T_amb_C : float
+            Mean ambient temperature, °C.
+        p_brine_bar : float
+            Brine pressure, absolute bar.
+        T_brine_out_min_ORC_C : float
+            Minimum ORC brine outlet temperature, °C.
+
+        Returns
+        -------
+        dict
+            ``"priority"`` (``"hp"``), ``"temperature_mapping"``,
+            ``"modularisation"`` (module counts, per-module flows and loads),
+            ``"per_module_design"`` (design outputs of one module, see
+            ``DesignANNModule.predict_frame``), ``"installed_total_design"``
+            (see :func:`scale_installed_outputs`) and ``"warnings"`` (list of
+            str).
+
+        Raises
+        ------
+        ValueError
+            If ``total_heating_load_W`` or ``total_brine_flow_kg_s`` is not
+            positive, or as raised by ``DesignANNModule.predict_one``.
+        KeyError
+            As raised by ``DesignANNModule.predict_one``.
+        """
         if total_heating_load_W <= 0.0:
             raise ValueError("total_heating_load_W must be positive")
         if total_brine_flow_kg_s <= 0.0:
@@ -153,6 +250,66 @@ class ReversibleDesignANN:
         require_positive_orc: bool = True,
         grid_csv_out: str | Path | None = None,
     ) -> dict[str, Any]:
+        """ORC-priority inverse design: choose the HP design load per module.
+
+        The module count is ``ceil(total_brine_flow_kg_s / nominal_flow)``
+        (at least 1). The HP design load per module is evaluated on
+        ``grid_points`` equally spaced values from ``target_min_W`` to
+        ``target_max_W``, and the feasible value with the largest
+        ``objective`` is selected. A value is feasible if the objective is
+        finite, ``hp_load_coverage_fraction >= min_hp_load_coverage`` and,
+        when ``require_positive_orc`` is true, the objective is positive.
+
+        Parameters
+        ----------
+        total_brine_flow_kg_s : float
+            Plant brine flow, kg/s. Must be positive.
+        T_brine_well_C : float
+            Brine (well) temperature, °C. Used directly as the design-ANN
+            ``T_brine_in_C``; the implied HP brine inlet is this minus
+            ``hp_drop``.
+        avg_T_amb_C : float
+            Mean ambient temperature, °C.
+        p_brine_bar : float
+            Brine pressure, absolute bar.
+        T_brine_out_min_ORC_C : float
+            Minimum ORC brine outlet temperature, °C.
+        grid_points : int, optional
+            Number of HP design loads evaluated (at least 2). Default 201.
+        objective : str, optional
+            Design output column to maximise, per module. The command line
+            offers ``"orc_P_net_W"`` (default) and ``"orc_P_gross_W"``.
+        min_hp_load_coverage : float, optional
+            Minimum ``hp_load_coverage_fraction`` (0–1) a candidate must reach.
+            Default 0.99.
+        require_positive_orc : bool, optional
+            If true (default), candidates with a non-positive objective are
+            infeasible.
+        grid_csv_out : str or pathlib.Path, optional
+            If given, all evaluated candidates are written to this CSV file
+            (folders are created as needed).
+
+        Returns
+        -------
+        dict
+            ``"priority"`` (``"orc"``), ``"temperature_mapping"``,
+            ``"modularisation"``, ``"inverse_search"`` (search settings, the
+            selected HP design load ``selected_equivalent_HP_design_target_W``,
+            the objective per module and plant total, whether the optimum is
+            at the edge of the search interval, and up to 10
+            ``top_candidates``), ``"per_module_design"``,
+            ``"installed_total_design"`` and ``"warnings"`` (list of str).
+
+        Raises
+        ------
+        ValueError
+            If ``total_brine_flow_kg_s`` is not positive, ``grid_points < 2``,
+            or as raised by ``DesignANNModule.predict_frame``.
+        KeyError
+            If ``objective`` is not a design output column.
+        RuntimeError
+            If no candidate is feasible.
+        """
         if total_brine_flow_kg_s <= 0.0:
             raise ValueError("total_brine_flow_kg_s must be positive")
         if grid_points < 2:
@@ -278,6 +435,7 @@ class ReversibleDesignANN:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Command-line options of this module (see ``--help``)."""
     parser = argparse.ArgumentParser(description="HP- and ORC-priority wrapper for the design ANN.")
     parser.add_argument("--model", default=str(bundled_model_path("design_ann_vopt6_module.joblib")))
     sub = parser.add_subparsers(dest="priority", required=True)
@@ -305,6 +463,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Run an HP- or ORC-priority design from the command line; print JSON."""
     args = build_parser().parse_args()
     wrapper = ReversibleDesignANN(args.model)
 

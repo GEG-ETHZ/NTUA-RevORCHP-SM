@@ -1,4 +1,31 @@
 #!/usr/bin/env python3
+"""Off-design surrogate of the fixed one- and two-stage nominal ORC hardware.
+
+Main entry points:
+
+- :func:`predict_orc_performance_for_design` chooses the one-stage or the
+  two-stage bundle from the **design** expander stage count (given directly or
+  from the design pressure ratio; ratio > 8 selects two stages) and calls
+- :func:`predict_1mw_orc_performance`, which evaluates one bundle.
+
+Fixed geometry is preserved in off-design operation. Net electrical power is
+signed and includes generator efficiency, pump, air-condenser fan and other
+auxiliaries. Heat rejection includes pump shaft work. Brine source and
+electrical balances are reconciled explicitly (README.md, "ORC off-design
+command").
+
+Training domain (README.md):
+
+- one stage: ``T_amb_C`` -11.9–34.8, ``T_brine_in_C`` 95–115,
+  ``p_brine_bar`` 12–24, ``T_brine_out_min_C`` 60–75,
+  ``m_brine_max_kg_s`` 3–8 (operation at the nominal 10 kg/s is outside the
+  validated flow domain);
+- two stages: ``T_amb_C`` -15.2–34.8, same brine ranges, ``m_brine_max_kg_s``
+  3–10.
+
+Inputs outside the bundle's ``input_bounds_filtered`` are reported in
+``warnings``.
+"""
 from __future__ import annotations
 
 import argparse
@@ -22,6 +49,24 @@ CORE_OUTPUTS = [
 
 
 def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add the derived input features used by the ORC models.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Columns ``T_amb_C``, ``T_brine_in_C``, ``p_brine_bar``,
+        ``T_brine_out_min_C`` and ``m_brine_max_kg_s``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Copy of ``df`` with ``source_deltaT_available_K`` (K),
+        ``brine_minus_ambient_K`` (K), ``brine_out_min_minus_ambient_K`` (K),
+        ``geo_capacity_proxy_W`` (= ``m_brine_max_kg_s *
+        source_deltaT_available_K``, in kg K/s despite its name),
+        ``Q_geo_avail_est_W`` (= 4180 * ``geo_capacity_proxy_W``, W) and
+        ``ambient_abs_C`` (absolute value of ``T_amb_C``).
+    """
     out = df.copy()
 
     out["source_deltaT_available_K"] = (
@@ -43,6 +88,21 @@ def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def inverse_y(pred: np.ndarray, spec: dict[str, Any]) -> pd.DataFrame:
+    """Undo the ``log1p`` target transform of a legacy variant model.
+
+    Parameters
+    ----------
+    pred : numpy.ndarray
+        Model output, one column per ``spec["target_columns"]``.
+    spec : dict
+        ``"target_columns"`` and optional ``"log_columns"``; ``exp(y) - 1`` is
+        applied to the log columns.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Predictions with the target column names.
+    """
     cols = spec["target_columns"]
     arr = np.asarray(pred, dtype=float).copy()
     if arr.ndim == 1:
@@ -57,6 +117,32 @@ def inverse_y(pred: np.ndarray, spec: dict[str, Any]) -> pd.DataFrame:
 
 
 def outputs_from_targets(targets: pd.DataFrame, variant: str) -> pd.DataFrame:
+    """Turn legacy variant targets into the standard ORC output columns.
+
+    Used only for bundles without ``schema_version ==
+    "corrected_orc_surrogate_v1"``; the bundles shipped in ``models/`` do not
+    use it.
+
+    Parameters
+    ----------
+    targets : pandas.DataFrame
+        Predicted targets (output of :func:`inverse_y`).
+    variant : str
+        ``"direct_power"``, ``"log_power"``, ``"efficiency_direct"`` or
+        ``"specific_power"``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The ``CORE_OUTPUTS`` columns. Heat, power and flow columns are clipped
+        at zero; ``orc_eta_gross`` and ``orc_eta_net`` are recomputed from
+        ``orc_Q_in_W``.
+
+    Raises
+    ------
+    ValueError
+        If ``variant`` is not one of the names above.
+    """
     out = pd.DataFrame(index=targets.index)
 
     def col(name: str, default: float = np.nan) -> np.ndarray:
@@ -138,6 +224,22 @@ def outputs_from_targets(targets: pd.DataFrame, variant: str) -> pd.DataFrame:
 
 
 def domain_warnings(row: pd.Series, bounds: dict[str, Any]) -> list[str]:
+    """List inputs outside the filtered training range.
+
+    Parameters
+    ----------
+    row : pandas.Series
+        Model inputs, indexed by column name.
+    bounds : dict
+        ``{column: {"min": value, "max": value}}`` (bundle
+        ``input_bounds_filtered``). Columns not in ``row`` are skipped.
+
+    Returns
+    -------
+    list of str
+        One message per value below its ``min`` or above its ``max``; empty
+        if all are inside.
+    """
     warnings: list[str] = []
 
     for col, lim in (bounds or {}).items():
@@ -165,6 +267,48 @@ def enforce_operating_constraints(outputs: pd.DataFrame, inputs: pd.DataFrame,
 
     The reference pump relation is shaft=electrical*motor_efficiency.
     Thus Qrej=Qin+pump_shaft-Pgross. Net power retains its physical sign.
+
+    Steps, as coded:
+
+    - ``orc_Q_in_W`` is clipped to the source capacity ``cp_J_kgK *
+      m_brine_max_kg_s * (T_brine_in_C - T_brine_out_min_C)``; rejected heat,
+      gross power, pump/fan/auxiliary power and ``orc_m_dot_orc_kg_s`` are
+      scaled by the same factor.
+    - ``orc_P_gross_W`` is limited to ``orc_Q_in_W + pump shaft power``.
+    - ``orc_P_exp_el_W = generator_efficiency * orc_P_gross_W`` and
+      ``orc_P_net_W = orc_P_exp_el_W - orc_P_pump_el_W - orc_P_acc_fan_W -
+      orc_P_other_aux_W``.
+    - The brine flow is clipped between the flow needed for ``orc_Q_in_W``
+      and ``m_brine_max_kg_s``; the brine outlet temperature follows from a
+      constant-cp balance.
+    - Rows where ``active`` is false get zero heat, power, flow, efficiencies
+      and speeds (``orc_Q_geo_avail_W`` is kept) and a brine outlet
+      temperature equal to the inlet.
+
+    Parameters
+    ----------
+    outputs : pandas.DataFrame
+        Raw model predictions (columns as in the bundle's ``target_columns``).
+    inputs : pandas.DataFrame
+        Model inputs with ``T_brine_in_C`` (°C), ``T_brine_out_min_C`` (°C)
+        and ``m_brine_max_kg_s`` (kg/s), one row per row of ``outputs``.
+    cp_J_kgK : float, optional
+        Constant brine specific heat, J/(kg K). Default 4200.
+    generator_efficiency : float, optional
+        Default 0.97.
+    pump_motor_efficiency : float, optional
+        Pump shaft power / pump electrical power. Default 0.95.
+    active : numpy.ndarray of bool, optional
+        Rows predicted to operate. If None, all rows are treated as active.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Copy of ``outputs`` with the reconciled values, plus
+        ``orc_P_pump_shaft_W``, ``orc_Q_geo_avail_W``, ``orc_Q_geo_used_W``
+        and the residuals ``orc_source_balance_residual_W``,
+        ``orc_electrical_balance_residual_W`` and
+        ``orc_thermal_balance_residual_W`` (W, round-off around zero).
     """
     out = outputs.copy()
     tin = inputs['T_brine_in_C'].to_numpy(dtype=float)
@@ -219,8 +363,35 @@ def enforce_operating_constraints(outputs: pd.DataFrame, inputs: pd.DataFrame,
     return out
 
 
-def predict_frames(bundle: dict[str, Any], inputs: pd.DataFrame):
-    """The same batch inference used by the public single-module wrapper."""
+def predict_frames(bundle: dict[str, Any], inputs: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The same batch inference used by the public single-module wrapper.
+
+    For bundles with ``schema_version == "corrected_orc_surrogate_v1"``
+    (all bundles shipped in ``models/``). No input checks are made here; see
+    :func:`predict_1mw_orc_performance` for those.
+
+    A row is "active" if the bundle's ``active_classifier`` predicts so, the
+    learned machine diagnostics are valid (speeds ``*_n_rpm`` > 0,
+    efficiencies ``*_eta_is``/``*_eta_vol`` in (0, 1]),
+    ``T_brine_in_C > T_brine_out_min_C`` and the raw ``orc_Q_in_W`` > 0.
+
+    Parameters
+    ----------
+    bundle : dict
+        Corrected ORC bundle.
+    inputs : pandas.DataFrame
+        One row per case with ``T_amb_C``, ``T_brine_in_C``, ``p_brine_bar``,
+        ``T_brine_out_min_C`` and ``m_brine_max_kg_s``.
+
+    Returns
+    -------
+    raw : pandas.DataFrame
+        Model predictions before reconciliation (bundle ``target_columns``).
+    deployed : pandas.DataFrame
+        Output of :func:`enforce_operating_constraints`, plus
+        ``orc_prediction_active`` (bool), ``orc_machine_diagnostics_valid``
+        (bool) and ``orc_active_probability``.
+    """
     frame = add_derived_features(inputs).reset_index(drop=True)
     X = frame[bundle['input_columns']].to_numpy(float)
     raw = pd.DataFrame(predict_model(bundle['models']['direct_power'],X),
@@ -255,6 +426,42 @@ def resolve_design_expander_stage_count(
     design_p_cond_bar: float | None = None,
     dual_stage_pressure_ratio_threshold: float = 8.0,
 ) -> dict[str, Any]:
+    """Decide whether the design has a one-stage or a two-stage expander.
+
+    Topology is set by the **design** pressure ratio, not the current
+    operating ratio (README.md). Priority: an explicit
+    ``design_expander_stage_count``; else the design pressure ratio
+    ``design_p_evap_bar / design_p_cond_bar`` (> threshold selects two
+    stages); else one stage (legacy default). If both are given they must
+    agree.
+
+    Parameters
+    ----------
+    design_expander_stage_count : int, optional
+        1 or 2.
+    design_p_evap_bar, design_p_cond_bar : float, optional
+        Design evaporation and condensation pressures, absolute bar. Give
+        both or neither; both must be positive.
+    dual_stage_pressure_ratio_threshold : float, optional
+        Pressure ratio above which two stages are selected. Must be finite and
+        > 1. Default 8.
+
+    Returns
+    -------
+    dict
+        ``"stage_count"`` (1 or 2), ``"selection_basis"``
+        (``"explicit_design_stage_count"``, ``"design_pressure_ratio"`` or
+        ``"legacy_single_stage_default"``), ``"design_pressure_ratio"``
+        (float or None) and ``"dual_stage_pressure_ratio_threshold"``.
+
+    Raises
+    ------
+    ValueError
+        If the threshold is not finite or not > 1, only one design pressure
+        is given, a design pressure is not finite or not positive, the stage
+        count is not 1 or 2, or the explicit stage count conflicts with the
+        pressure-ratio rule.
+    """
     if not np.isfinite(float(dual_stage_pressure_ratio_threshold)):
         raise ValueError("dual_stage_pressure_ratio_threshold must be finite")
     threshold = float(dual_stage_pressure_ratio_threshold)
@@ -315,6 +522,70 @@ def predict_1mw_orc_performance(
     m_brine_max_kg_s: float,
     variant: str | None = None,
 ) -> dict[str, Any]:
+    """Predict the off-design performance of one ORC bundle.
+
+    Most callers should use :func:`predict_orc_performance_for_design`,
+    which picks the right bundle for the design expander stage count.
+
+    Parameters
+    ----------
+    model_path : str or pathlib.Path
+        Path to an ORC bundle, e.g.
+        ``models/orc_synthetic_year_surrogate_filtered_variants_vopt6.joblib``
+        (one stage) or ``..._two_stage.joblib`` (two stages).
+    T_amb_C : float
+        Ambient temperature, °C.
+    T_brine_in_C : float
+        Brine inlet temperature, °C (training domain 95–115).
+    p_brine_bar : float
+        Brine pressure, absolute bar (training domain 12–24). Must be > 0.
+    T_brine_out_min_C : float
+        Minimum brine outlet temperature, °C (training domain 60–75). Must
+        not exceed ``T_brine_in_C``.
+    m_brine_max_kg_s : float
+        Available brine flow, kg/s (training domain 3–8 one stage, 3–10 two
+        stages). Must be > 0.
+    variant : str, optional
+        For the shipped (corrected) bundles only ``None`` or
+        ``"direct_power"`` is accepted.
+
+    Returns
+    -------
+    dict
+        - ``"selected_variant"``: ``"direct_power"`` for the shipped bundles.
+        - ``"orc"`` (and the same dict under ``"selected"``): main keys
+          ``orc_Q_in_W``, ``orc_Q_rej_W``, ``orc_P_gross_W``,
+          ``orc_P_exp_el_W``, ``orc_P_pump_el_W``, ``orc_P_pump_shaft_W``,
+          ``orc_P_acc_fan_W``, ``orc_P_other_aux_W``, ``orc_P_net_W``
+          (signed), ``orc_m_brine_kg_s``, ``orc_T_brine_out_C``,
+          ``orc_Q_geo_avail_W``, ``orc_Q_geo_used_W``, ``orc_eta_gross``,
+          ``orc_eta_net``, ``orc_m_dot_orc_kg_s``, per-stage machine
+          diagnostics ``orc_stage<N>_n_rpm``/``_eta_is``/``_eta_vol``,
+          ``orc_prediction_active`` (bool) and ``*_residual_W`` balance
+          residuals. Units as in the key suffix.
+        - ``"all_variants"``: ``{variant name: dict like "orc"}``.
+        - ``"derived_inputs"``: inputs including derived features.
+        - ``"model_metadata"``: model path, ``expander_stage_count`` and
+          (for corrected bundles) release version, reference hashes and
+          ``nominal_design``.
+        - ``"warnings"``: list of str.
+
+    Raises
+    ------
+    ValueError
+        If an input is not finite, ``p_brine_bar <= 0``,
+        ``m_brine_max_kg_s <= 0`` or ``T_brine_in_C < T_brine_out_min_C``.
+    KeyError
+        If ``variant`` is not available in the bundle.
+    FileNotFoundError
+        If ``model_path`` does not exist.
+
+    Notes
+    -----
+    The second half of this function handles older bundles without
+    ``schema_version == "corrected_orc_surrogate_v1"``; the shipped bundles
+    return from the first branch.
+    """
     resolved_model_path = Path(model_path).resolve()
     values = [T_amb_C, T_brine_in_C, p_brine_bar, T_brine_out_min_C, m_brine_max_kg_s]
     if not np.isfinite(values).all():
@@ -375,6 +646,7 @@ def predict_1mw_orc_performance(
     X = row[input_columns].astype(float).to_numpy()
 
     def predict_variant(name: str) -> dict[str, float]:
+        """Predict one legacy variant and return its outputs as floats."""
         model = bundle["models"][name]
         spec = bundle["variant_specs"][name]
         pred_targets = inverse_y(predict_model(model,X), spec)
@@ -427,6 +699,49 @@ def predict_orc_performance_for_design(
     dual_stage_pressure_ratio_threshold: float = 8.0,
     variant: str | None = None,
 ) -> dict[str, Any]:
+    """Predict ORC off-design performance with the bundle matching the design.
+
+    The design expander stage count is resolved with
+    :func:`resolve_design_expander_stage_count`; the one-stage or two-stage
+    bundle is then evaluated with :func:`predict_1mw_orc_performance`.
+
+    Parameters
+    ----------
+    one_stage_model_path : str or pathlib.Path
+        Path to the one-stage ORC bundle.
+    two_stage_model_path : str or pathlib.Path or None
+        Path to the two-stage ORC bundle. Required if the design has two
+        stages.
+    T_amb_C, T_brine_in_C, p_brine_bar, T_brine_out_min_C, m_brine_max_kg_s : float
+        Operating conditions, as in :func:`predict_1mw_orc_performance`
+        (°C, °C, absolute bar, °C, kg/s).
+    design_expander_stage_count : int, optional
+        1 or 2.
+    design_p_evap_bar, design_p_cond_bar : float, optional
+        Design evaporation and condensation pressures, absolute bar.
+    dual_stage_pressure_ratio_threshold : float, optional
+        Default 8.
+    variant : str, optional
+        Passed to :func:`predict_1mw_orc_performance`.
+
+    Returns
+    -------
+    dict
+        The result of :func:`predict_1mw_orc_performance`, plus
+        ``"expander_selection"``: the result of
+        :func:`resolve_design_expander_stage_count` with
+        ``"selected_model_path"`` and ``"model_metadata_stage_count"``.
+
+    Raises
+    ------
+    ValueError
+        As raised by :func:`resolve_design_expander_stage_count` and
+        :func:`predict_1mw_orc_performance`; also if two stages are required
+        but ``two_stage_model_path`` is None, or if the selected bundle
+        declares a different stage count.
+    KeyError
+        If ``variant`` is not available in the bundle.
+    """
     selection = resolve_design_expander_stage_count(
         design_expander_stage_count=design_expander_stage_count,
         design_p_evap_bar=design_p_evap_bar,
@@ -475,6 +790,7 @@ def predict_orc_performance_for_design(
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Command-line options of this module (see ``--help``)."""
     p = argparse.ArgumentParser(description="Predict with filtered ORC off-design surrogate.")
 
     p.add_argument("--model", required=True)
@@ -494,6 +810,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Run one ORC off-design prediction from the command line; print JSON."""
     args = build_parser().parse_args()
 
     result = predict_orc_performance_for_design(
