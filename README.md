@@ -96,3 +96,14 @@ These scores measure agreement with the corrected thermodynamic simulator. Numer
 ## Licence and citation
 
 Apache-2.0; see LICENSE and CITATION.cff. Cite version 1.0.2 for these corrected models.
+
+## Tests
+
+The tests check that every command above and a set of direct Python calls still give the stored reference outputs in `tests/data/`. From this repository directory:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pytest
+```
+
+They also run automatically on GitHub for every pull request. A failure means an output changed; see `tests/generate_reference.py` before regenerating the reference files.
