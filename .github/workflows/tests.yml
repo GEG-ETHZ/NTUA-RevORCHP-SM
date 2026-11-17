@@ -22,3 +22,46 @@ jobs:
         run: python -m pip install -r requirements.txt -r requirements-dev.txt
       - name: Run tests
         run: python -m pytest
+
+  # Install the package the way other projects will (not editable), then run
+  # the tests from another folder so that they use the installed copy,
+  # including the model files shipped inside it.
+  installed-package:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the package
+        run: python -m pip install . -r requirements.txt -r requirements-dev.txt
+      - name: Run tests from outside the repository
+        working-directory: ${{ runner.temp }}
+        run: |
+          python -c "import revorchp_sm; print(revorchp_sm.__file__)"
+          python -m pytest "${{ github.workspace }}/tests"
+      - name: Run an installed command from outside the repository
+        working-directory: ${{ runner.temp }}
+        run: revorchp-sm-design hp --total-heating-load-mw 1.8 --total-brine-flow-kg-s 20 --T-brine-in-hp-c 65 --avg-T-amb-c 9.7 --p-brine-bar 18 --T-brine-out-min-orc-c 70
+
+  # The newest numpy/scipy/pandas allowed by pyproject.toml, with the
+  # scikit-learn version the models were saved with. A failure here means a
+  # newer dependency changes the outputs.
+  newest-dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the package with the newest dependencies
+        run: python -m pip install --upgrade . pytest
+      - name: Show versions
+        run: python -m pip list
+      - name: Run tests from outside the repository
+        working-directory: ${{ runner.temp }}
+        run: python -m pytest "${{ github.workspace }}/tests"
