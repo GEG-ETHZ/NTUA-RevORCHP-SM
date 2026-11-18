@@ -1,4 +1,29 @@
 #!/usr/bin/env python3
+"""Off-design surrogate of the fixed 1 MW nominal heat-pump hardware.
+
+Main entry point: :func:`predict_1mw_hp_performance`. The bundle describes its
+own fixed nominal hardware; a geometry from the design surrogate cannot be
+passed in (README.md).
+
+Summary of the calculation (README.md, "HP off-design command"):
+
+- Sink supply temperature = HP brine inlet + ``temperature_lift_K``; sink
+  return = supply - ``sink_deltaT_K``; condensation temperature = supply +
+  5 K (``sink_approach_K`` in the bundle).
+- Learned models predict delivered heat and one of three "variants" for the
+  compressor power: ``inverse_cop`` (the selected variant), ``direct_w`` or
+  ``pressure_hybrid``.
+- Delivered heat is then capped by the requested load, the source heat and
+  the fixed condenser capacity, with ``Q_delivered = Q_source + W_comp``. The
+  full available brine flow is used. The minimum brine outlet temperature is
+  a lower operating constraint.
+
+Training domain (README.md): ``T_brine_in_C`` 55–75, ``p_brine_bar`` 12–24,
+``T_brine_out_min_C`` 35–45, ``m_brine_max_kg_s`` 5–12, ``heating_load_W``
+50000–1e6, ``T_sink_supply_C`` 75–100, ``sink_deltaT_K`` 10–25. Loads below
+0.2 MW are extrapolation. Inputs outside the bundle's
+``input_bounds_filtered`` are reported in ``warnings``.
+"""
 from __future__ import annotations
 
 import argparse
@@ -16,6 +41,11 @@ SMALL = 1.0e-12
 
 
 def json_default(obj: Any) -> Any:
+    """Convert NumPy scalars/arrays and paths so ``json.dumps`` can write them.
+
+    NumPy integers and floats become ``int``/``float``, arrays become lists,
+    and anything else becomes ``str(obj)``.
+    """
     if isinstance(obj, (np.integer,)):
         return int(obj)
     if isinstance(obj, (np.floating,)):
@@ -28,10 +58,29 @@ def json_default(obj: Any) -> Any:
 
 
 def undo_log(y: np.ndarray) -> np.ndarray:
+    """Inverse of the ``log1p`` target transform: ``exp(y) - 1``."""
     return np.expm1(np.asarray(y, dtype=float))
 
 
 def eval_eta_poly(poly: dict[str, Any], pr: np.ndarray) -> np.ndarray:
+    """Evaluate a polynomial efficiency fit of pressure ratio, then clip it.
+
+    Only used by the ``pressure_hybrid`` variant for bundles that do not
+    predict ``hp_eta_is`` directly (see :func:`compute_variant`).
+
+    Parameters
+    ----------
+    poly : dict
+        ``"coeffs_desc"`` (polynomial coefficients, highest power first),
+        ``"eta_clip_min"`` and ``"eta_clip_max"``.
+    pr : numpy.ndarray
+        Pressure ratio ``p_cond / p_evap`` (dimensionless).
+
+    Returns
+    -------
+    numpy.ndarray
+        Efficiency (dimensionless), clipped to the given limits.
+    """
     eta = np.polyval(np.asarray(poly["coeffs_desc"], dtype=float), np.asarray(pr, dtype=float))
     return np.clip(eta, float(poly["eta_clip_min"]), float(poly["eta_clip_max"]))
 
@@ -50,6 +99,47 @@ def build_feature_frame(
     cp_proxy_J_kgK: float,
     input_columns: list[str],
 ) -> pd.DataFrame:
+    """Build the one-row input frame for the HP models, with derived features.
+
+    Parameters
+    ----------
+    T_brine_in_C : float
+        HP brine inlet temperature, °C.
+    p_brine_bar : float
+        Brine pressure, absolute bar.
+    T_brine_out_min_C : float
+        Minimum brine outlet temperature, °C.
+    m_brine_max_kg_s : float
+        Available brine flow, kg/s.
+    heating_load_W : float
+        Requested heating load, W.
+    temperature_lift_K : float
+        Sink supply temperature minus HP brine inlet temperature, K.
+    sink_deltaT_K : float
+        Sink supply minus sink return temperature, K.
+    sink_approach_K : float
+        Condensation temperature minus sink supply temperature, K.
+    nominal_load_W : float
+        Nominal heating load used for ``load_fraction_nominal``, W.
+    cp_proxy_J_kgK : float
+        Constant specific heat used only for the ``geo_capacity_proxy_W``
+        feature, J/(kg K).
+    input_columns : list of str
+        Columns the models expect, in order (bundle ``input_columns``).
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row with exactly ``input_columns``. Derived features include
+        ``T_sink_supply_C``, ``T_sink_return_C``, ``T_cond_HP_target_C``,
+        ``load_fraction_nominal``, ``source_deltaT_available_K`` and
+        ``geo_capacity_proxy_W``.
+
+    Raises
+    ------
+    KeyError
+        If ``input_columns`` asks for a column that is not built here.
+    """
     row: dict[str, float] = {
         "T_brine_in_C": float(T_brine_in_C),
         "p_brine_bar": float(p_brine_bar),
@@ -85,6 +175,22 @@ def build_feature_frame(
 
 
 def domain_warnings(row: pd.Series, bounds: dict[str, Any]) -> list[str]:
+    """List inputs outside the training range.
+
+    Parameters
+    ----------
+    row : pandas.Series
+        Model inputs (including derived features), indexed by column name.
+    bounds : dict
+        ``{column: {"min": value, "max": value}}`` (bundle
+        ``input_bounds_filtered``). Columns not in ``row`` are skipped.
+
+    Returns
+    -------
+    list of str
+        One message per value below its ``min`` or above its ``max``; empty
+        if all are inside.
+    """
     warnings: list[str] = []
     for col, lim in (bounds or {}).items():
         if col not in row.index:
@@ -100,6 +206,49 @@ def domain_warnings(row: pd.Series, bounds: dict[str, Any]) -> list[str]:
 
 
 def compute_variant(bundle: dict[str, Any], X: np.ndarray, q_pred: np.ndarray, variant: str) -> dict[str, float]:
+    """Compressor power and COP from one variant model, before constraints.
+
+    Variants:
+
+    - ``direct_w``: the model predicts ``hp_W_comp_W``.
+    - ``inverse_cop``: the model predicts ``hp_inverse_COP`` (W / Q);
+      ``hp_W_comp_W = Q * hp_inverse_COP``.
+    - ``pressure_hybrid``: the model predicts condensing and evaporating
+      pressures, ``hp_W_is_proxy_W`` and (in the corrected bundles)
+      ``hp_eta_is``; ``hp_W_comp_W = hp_W_is_proxy_W / eta``.
+
+    Afterwards ``hp_W_comp_W`` is clipped to ``[0, Q]`` and
+    ``hp_Q_source_W`` is set to ``Q - W`` so that the energy balance closes.
+
+    Parameters
+    ----------
+    bundle : dict
+        HP bundle.
+    X : numpy.ndarray
+        Model inputs, shape ``(1, n_features)``.
+    q_pred : numpy.ndarray
+        Output of the bundle's ``q_model`` for ``X``, shape
+        ``(1, len(bundle["q_output_columns"]))``.
+    variant : str
+        Name of the variant (a key of ``bundle["variant_models"]``).
+
+    Returns
+    -------
+    dict
+        Includes ``hp_Q_delivered_W`` (W, >= 0), ``hp_W_comp_W`` (W),
+        ``hp_COP``, ``hp_inverse_COP``, ``hp_Q_source_W`` (W),
+        ``hp_Q_source_surrogate_W`` (the learned source heat, kept as a
+        diagnostic, W) and ``hp_energy_balance_residual_W``, plus the raw
+        variant outputs. ``pressure_hybrid`` also adds ``hp_pressure_ratio``
+        and ``hp_eta_is_fit``.
+
+    Raises
+    ------
+    KeyError
+        If the variant is not in the bundle or has no target columns.
+    ValueError
+        If the variant name is not one of the three above.
+    """
     if variant not in bundle["variant_models"]:
         raise KeyError(
             f"Variant {variant!r} is not available. "
@@ -171,15 +320,65 @@ def compute_variant(bundle: dict[str, Any], X: np.ndarray, q_pred: np.ndarray, v
     return out
 
 
-def enforce_operating_constraints(out, *, heating_load_W, T_brine_in_C,
-                                  T_brine_out_min_C, m_brine_max_kg_s,
-                                  cp_J_kgK=4200.0, full_available_flow=False,
-                                  UA_common_W_K=None, sink_deltaT_K=None,
-                                  sink_approach_K=5.0):
+def enforce_operating_constraints(out: dict[str, Any], *, heating_load_W: float, T_brine_in_C: float,
+                                  T_brine_out_min_C: float, m_brine_max_kg_s: float,
+                                  cp_J_kgK: float = 4200.0, full_available_flow: bool = False,
+                                  UA_common_W_K: float | None = None, sink_deltaT_K: float | None = None,
+                                  sink_approach_K: float = 5.0) -> dict[str, Any]:
     """Project onto the existing constant-cp source envelope at predicted COP.
 
     This protects feasibility outside stable fitting data; it is not a detailed
     thermodynamic re-solve. The unprojected source estimate remains diagnostic.
+
+    Delivered heat, compressor power and source heat are multiplied by one
+    common factor (at most 1, so the COP is kept), chosen so that none of
+    these limits is exceeded:
+
+    - delivered heat <= ``heating_load_W``;
+    - source heat <= ``cp_J_kgK * m_brine_max_kg_s * (T_brine_in_C -
+      T_brine_out_min_C)``;
+    - delivered heat <= condenser limit ``UA_common_W_K * sink_deltaT_K /
+      ln(1 + sink_deltaT_K / sink_approach_K)`` (only if both
+      ``UA_common_W_K`` and ``sink_deltaT_K`` are given).
+
+    The brine outlet temperature then follows from a constant-cp balance, and
+    ``hp_T_evap_C`` is set to the brine outlet temperature minus 5 K.
+
+    Parameters
+    ----------
+    out : dict
+        Output of :func:`compute_variant` (not modified; a copy is returned).
+    heating_load_W : float
+        Requested heating load, W.
+    T_brine_in_C : float
+        HP brine inlet temperature, °C.
+    T_brine_out_min_C : float
+        Minimum brine outlet temperature, °C.
+    m_brine_max_kg_s : float
+        Available brine flow, kg/s.
+    cp_J_kgK : float, optional
+        Constant brine specific heat, J/(kg K). Default 4200.
+    full_available_flow : bool, optional
+        If true, the brine flow is always ``m_brine_max_kg_s``; otherwise it
+        is the learned ``hp_m_brine_kg_s`` clipped between the flow needed
+        for the source heat and ``m_brine_max_kg_s``.
+    UA_common_W_K : float, optional
+        UA of the fixed condenser (common heat exchanger), W/K.
+    sink_deltaT_K : float, optional
+        Sink supply minus return temperature, K.
+    sink_approach_K : float, optional
+        Condensation minus sink supply temperature, K. Default 5.
+
+    Returns
+    -------
+    dict
+        Copy of ``out`` with updated ``hp_Q_delivered_W``, ``hp_W_comp_W``,
+        ``hp_Q_source_W``, ``hp_COP``, ``hp_inverse_COP``, and added
+        ``hp_constraint_projection_applied`` (bool), ``hp_m_brine_kg_s``,
+        ``hp_T_brine_out_C``, ``hp_T_evap_C``, ``hp_unmet_load_W``,
+        ``hp_load_coverage_frac``, ``hp_source_capacity_limit_W``,
+        ``hp_condenser_capacity_limit_W`` (only if a condenser limit was
+        computed) and ``hp_energy_balance_residual_W``.
     """
     out = dict(out)
     q = max(float(out["hp_Q_delivered_W"]), 0.0)
@@ -218,11 +417,36 @@ def enforce_operating_constraints(out, *, heating_load_W, T_brine_in_C,
     return out
 
 
-def reconcile_pressures(out, bundle, *, T_brine_in_C, temperature_lift_K):
+def reconcile_pressures(out: dict[str, Any], bundle: dict[str, Any], *, T_brine_in_C: float,
+                        temperature_lift_K: float) -> dict[str, Any]:
     """Reconstruct saturation pressure at final temperatures without CoolProp.
 
     Learned pressure-head values remain diagnostics. Outside the embedded
     saturation range actual pressure fields are omitted, never endpoint-clipped.
+
+    Parameters
+    ----------
+    out : dict
+        Output of :func:`enforce_operating_constraints` (must contain
+        ``hp_T_evap_C``). Not modified; a copy is returned.
+    bundle : dict
+        HP bundle. If it has no ``saturation_pressure_table``, ``out`` is
+        returned unchanged.
+    T_brine_in_C : float
+        HP brine inlet temperature, °C.
+    temperature_lift_K : float
+        Sink supply temperature minus HP brine inlet temperature, K.
+
+    Returns
+    -------
+    dict
+        Copy of ``out`` where learned ``hp_p_cond_bar``/``hp_p_evap_bar`` are
+        renamed to ``hp_p_cond_surrogate_bar``/``hp_p_evap_surrogate_bar``,
+        and with ``hp_T_cond_C`` (= ``T_brine_in_C + temperature_lift_K +
+        sink_approach_K``, °C), ``hp_p_cond_bar`` and ``hp_p_evap_bar``
+        (bar, interpolated in the table; each omitted if its temperature is
+        outside the table), ``hp_pressure_state_supported`` (bool) and
+        ``hp_pressure_ratio`` (only if both pressures are supported).
     """
     out = dict(out)
     table = bundle.get("saturation_pressure_table")
@@ -261,6 +485,73 @@ def predict_1mw_hp_performance(
     variant: str | None = None,
     return_all_variants: bool = True,
 ) -> dict[str, Any]:
+    """Predict the off-design performance of the fixed 1 MW nominal heat pump.
+
+    Parameters
+    ----------
+    model_path : str or pathlib.Path
+        Path to the HP bundle, normally
+        ``models/hp_synthetic_year_surrogate_1mw_filtered_variants_vopt6_hp55_75_out35_45_sourcebalanced.joblib``.
+    T_brine_in_C : float
+        HP brine inlet temperature, °C (training domain 55–75).
+    p_brine_bar : float
+        Brine pressure, absolute bar (training domain 12–24). Must be > 0.
+    T_brine_out_min_C : float
+        Minimum brine outlet temperature, °C (training domain 35–45). A lower
+        operating constraint; must be below ``T_brine_in_C``.
+    m_brine_max_kg_s : float
+        Available brine flow, kg/s (training domain 5–12). Must be > 0. With
+        the shipped bundle the full available flow is always used.
+    heating_load_W : float
+        Requested heating load, W (training domain 50000–1e6; below 200000 W
+        is extrapolation). Must be >= 0.
+    temperature_lift_K : float
+        Sink supply temperature minus ``T_brine_in_C``, K. The resulting sink
+        supply temperature has training domain 75–100 °C.
+    sink_deltaT_K : float
+        Sink supply minus sink return temperature, K (training domain 10–25).
+        Must be > 0.
+    variant : str, optional
+        ``"inverse_cop"``, ``"direct_w"`` or ``"pressure_hybrid"``. Default:
+        the bundle's ``selected_variant`` (``"inverse_cop"``).
+    return_all_variants : bool, optional
+        If true (default), also evaluate every variant in the bundle and
+        return them under ``"variants"``.
+
+    Returns
+    -------
+    dict
+        - ``"surrogate"``: ``"hp_offdesign"``.
+        - ``"selected_variant"``: name of the variant reported in ``"hp"``.
+        - ``"inputs"``: model inputs including derived features (e.g.
+          ``T_sink_supply_C``, ``T_sink_return_C``, ``T_cond_HP_target_C``).
+        - ``"hp"``: results of the selected variant. Main keys:
+          ``hp_Q_delivered_W``, ``hp_W_comp_W``, ``hp_Q_source_W`` (W),
+          ``hp_COP``, ``hp_m_brine_kg_s``, ``hp_T_brine_out_C``,
+          ``hp_unmet_load_W``, ``hp_load_coverage_frac``, ``hp_T_cond_C``,
+          ``hp_T_evap_C``, ``hp_p_cond_bar``, ``hp_p_evap_bar`` (omitted if
+          outside the saturation table), ``hp_constraint_projection_applied``,
+          ``hp_physical_status_supported``, ``hp_pressure_state_supported``;
+          raw diagnostics ``hp_Q_delivered_raw_W``, ``hp_W_comp_raw_W`` and
+          ``hp_Q_source_surrogate_W``; and ``hp_energy_balance_residual_W``.
+        - ``"warnings"``: list of str (inputs outside the training range,
+          projection applied, load below the fitting regime, unsupported
+          regime or pressure state).
+        - ``"model_metadata"``: ``bundle_version`` and reference hashes.
+        - ``"variants"``: ``{name: dict like "hp"}`` (only if
+          ``return_all_variants``).
+
+    Raises
+    ------
+    ValueError
+        If an input is not finite, ``T_brine_in_C <= T_brine_out_min_C``,
+        ``p_brine_bar <= 0``, ``m_brine_max_kg_s <= 0``,
+        ``heating_load_W < 0`` or ``sink_deltaT_K <= 0``.
+    KeyError
+        If ``variant`` is not available in the bundle.
+    FileNotFoundError
+        If ``model_path`` does not exist.
+    """
     values = [T_brine_in_C, p_brine_bar, T_brine_out_min_C,
               m_brine_max_kg_s, heating_load_W, temperature_lift_K, sink_deltaT_K]
     if not np.isfinite(values).all():
@@ -293,7 +584,12 @@ def predict_1mw_hp_performance(
     selected = variant or bundle.get("selected_variant", "inverse_cop")
     classifier = bundle.get("physical_status_classifier")
     status_supported = True if classifier is None else bool(predict_model(classifier, X)[0])
-    def evaluate(name):
+    def evaluate(name: str) -> dict[str, Any]:
+        """Variant prediction -> operating constraints -> pressures.
+
+        If the bundle's physical-status classifier rejects the input, heat and
+        power are set to zero before the constraints are applied.
+        """
         out = compute_variant(bundle, X, q_pred, name)
         out["hp_Q_delivered_raw_W"] = out["hp_Q_delivered_W"]
         out["hp_W_comp_raw_W"] = out["hp_W_comp_W"]
@@ -338,6 +634,7 @@ def predict_1mw_hp_performance(
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Command-line options of this module (see ``--help``)."""
     p = argparse.ArgumentParser(description="Predict 1 MW HP off-design performance.")
     p.add_argument("--model", required=True)
     p.add_argument("--T-brine-in-c", type=float, required=True)
@@ -357,6 +654,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Run one HP off-design prediction from the command line; print JSON."""
     args = build_parser().parse_args()
     heating_load_W = args.heating_load_W
     if heating_load_W is None:
