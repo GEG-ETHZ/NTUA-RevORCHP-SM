@@ -19,7 +19,22 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-The thirteen tracked files are the complete runtime package. No training datasets, MATLAB files, analytical solver or CoolProp installation are needed for inference. Small property approximations/tables required for physical reconstruction are embedded in the relevant bundles and checked against the analytical property routines. In the commands below, use `.venv/Scripts/python.exe` in place of `python` when using this environment.
+On Linux or macOS:
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+The files listed under [Files](#files) are the complete runtime package. No training datasets, MATLAB files, analytical solver or CoolProp installation are needed for inference. Small property approximations/tables required for physical reconstruction are embedded in the relevant bundles and checked against the analytical property routines. In the commands below, use `.venv/Scripts/python.exe` (Windows) or `.venv/bin/python` (Linux/macOS) in place of `python` when using this environment.
+
+To use the models from other Python code, install the package (models included) into any environment instead:
+
+```bash
+pip install "git+https://github.com/trx09009/RevORCHP-SM-1.0.2"
+```
+
+It provides the `revorchp_sm` package (e.g. `from revorchp_sm.hp_offdesign_surrogate_1mw_filtered_variants_vopt6 import predict_1mw_hp_performance`).
 
 ## Design commands
 
@@ -83,11 +98,14 @@ These scores measure agreement with the corrected thermodynamic simulator. Numer
 - `LICENSE`
 - `CITATION.cff`
 - `requirements.txt`
-- `bundle_io.py`
-- `design_ann_vopt6_predictor.py`
-- `reversible_design_ann_vopt6_wrapper.py`
-- `hp_offdesign_surrogate_1mw_filtered_variants_vopt6.py`
-- `orc_offdesign_surrogate_filtered_variants_vopt6.py`
+- `pyproject.toml`
+- `src/revorchp_sm/__init__.py`
+- `src/revorchp_sm/bundle_io.py`
+- `src/revorchp_sm/design_ann_vopt6_predictor.py`
+- `src/revorchp_sm/reversible_design_ann_vopt6_wrapper.py`
+- `src/revorchp_sm/hp_offdesign_surrogate_1mw_filtered_variants_vopt6.py`
+- `src/revorchp_sm/orc_offdesign_surrogate_filtered_variants_vopt6.py`
+- `design_ann_vopt6_predictor.py`, `reversible_design_ann_vopt6_wrapper.py`, `hp_offdesign_surrogate_1mw_filtered_variants_vopt6.py`, `orc_offdesign_surrogate_filtered_variants_vopt6.py` (short scripts that run the package code, for the commands above)
 - `models/design_ann_vopt6_module.joblib`
 - `models/hp_synthetic_year_surrogate_1mw_filtered_variants_vopt6_hp55_75_out35_45_sourcebalanced.joblib`
 - `models/orc_synthetic_year_surrogate_filtered_variants_vopt6.joblib`
