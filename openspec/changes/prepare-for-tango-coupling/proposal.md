@@ -4,13 +4,13 @@
 
 In FlexGEO, the reversible ORC / heat-pump system of task T2.2 is to become the surface plant of TANGO, the simulator that couples the subsurface, the plant and the economics (task T4.5). The first coupled simulation is due at the end of January 2027 (milestone MS4.2). TANGO will call these surrogate models for every hour of one representative day per month, many times per simulated year, inside optimizations.
 
-The models work well as published, and the README documents their inputs, units and validity ranges carefully. A few things make them hard to call from another program:
+The README states the inputs, units and validity ranges of each model, and its example commands run as documented with the pinned versions. A few things make the models hard to call from another program:
 
-- The code is a set of scripts, not a Python package that can be installed and imported from anywhere.
-- `requirements.txt` pins exact versions. TANGO needs to install the models in its own environment, next to its own dependencies.
+- The code is a set of scripts, not a Python package that can be installed as a dependency and imported from anywhere.
+- `requirements.txt` pins exact versions. TANGO needs to install the models in its own environment, as one of its own dependencies.
 - There are no automated tests, so neither of us can show that a change to the code leaves the model outputs unchanged.
 - Each call evaluates one operating point and returns warnings as sentences, which a program cannot act on reliably.
-- The `.joblib` files only load with scikit-learn 1.8.0.
+- The `.joblib` files only load reliably with scikit-learn 1.8.0, which could cause trouble because a `.joblib` file stores the trained model as scikit-learn's internal Python objects, and scikit-learn only guarantees that such a file loads with the version that wrote it. Every program that uses the models must then stay on 1.8.0 for everything else in its environment too, and cannot take scikit-learn's bug fixes or support for newer Python versions. When 1.8.0 no longer installs on a current Python, the models stop working, even though the trained numbers in them are still valid. Inside, the models are numbers: weight matrices, scaling factors, tree thresholds and small property tables; storing those in a format that does not depend on one library version keeps them usable for as long as the physics is.
 
 This document proposes what to change, so that we agree on it before any code is merged. For each task it leaves open who does it: you, or the TANGO team at ETH Zurich. The TANGO team has already drafted the first three as pull requests, to make the proposal concrete, but nothing is final until you agree.
 

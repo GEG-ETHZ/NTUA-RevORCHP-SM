@@ -20,6 +20,8 @@ The package layout keeps a script with each original name at the top level, and 
 
 The `.joblib` files store the scikit-learn version that wrote them, so scikit-learn stays at exactly 1.8.0 until D5 is done. numpy, scipy, pandas, joblib and threadpoolctl get lower bounds. The tests pass with numpy 2.0 and pandas 2.2 (the oldest allowed) and with numpy 2.5 and pandas 3.1 (the newest at the time of writing). `requirements.txt` stays as the exact environment you tested.
 
+Until then, TANGO can keep the pin away from its other users: its lock file can resolve the RevORCHP-SM dependency group, with scikit-learn 1.8.0, separately from TANGO's own scikit-learn (checked with uv on 2026-11-18). So the portable files (D5) remove a long-term risk rather than block the first coupling.
+
 ### D4: New functions, not changed ones
 
 The batch interface, status values and bounds (item 4) are new functions next to the existing ones, which keep their names, arguments and results.
