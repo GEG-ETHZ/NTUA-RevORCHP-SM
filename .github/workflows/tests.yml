@@ -44,15 +44,18 @@ jobs:
         run: |
           python -c "import revorchp_sm; print(revorchp_sm.__file__)"
           python -m pytest "${{ github.workspace }}/tests"
-      - name: Run an installed command from outside the repository
+      - name: Run the installed design wrapper from outside the repository
         working-directory: ${{ runner.temp }}
-        run: revorchp-sm-design hp --total-heating-load-mw 1.8 --total-brine-flow-kg-s 20 --T-brine-in-hp-c 65 --avg-T-amb-c 9.7 --p-brine-bar 18 --T-brine-out-min-orc-c 70
+        run: python -m revorchp_sm.reversible_design_ann_vopt6_wrapper hp --total-heating-load-mw 1.8 --total-brine-flow-kg-s 20 --T-brine-in-hp-c 65 --avg-T-amb-c 9.7 --p-brine-bar 18 --T-brine-out-min-orc-c 70
 
   # The newest numpy/scipy/pandas allowed by pyproject.toml, with the
   # scikit-learn version the models were saved with. A failure here means a
-  # newer dependency changes the outputs.
+  # newer dependency changes the outputs. It reports without blocking a
+  # merge, because a new numpy, scipy or pandas release can turn it red
+  # without any change in this repository.
   newest-dependencies:
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

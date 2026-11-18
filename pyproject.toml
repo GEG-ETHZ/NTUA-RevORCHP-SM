@@ -35,13 +35,6 @@ dependencies = [
 [project.urls]
 Repository = "https://github.com/trx09009/RevORCHP-SM-1.0.2"
 
-# The same three commands as in README.md, available on the PATH after
-# installing (e.g. `revorchp-sm-hp-offdesign --help`).
-[project.scripts]
-revorchp-sm-design = "revorchp_sm.reversible_design_ann_vopt6_wrapper:main"
-revorchp-sm-hp-offdesign = "revorchp_sm.hp_offdesign_surrogate_1mw_filtered_variants_vopt6:main"
-revorchp-sm-orc-offdesign = "revorchp_sm.orc_offdesign_surrogate_filtered_variants_vopt6:main"
-
 [tool.hatch.version]
 path = "src/revorchp_sm/__init__.py"
 

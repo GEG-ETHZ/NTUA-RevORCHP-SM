@@ -34,7 +34,7 @@ To use the models from other Python code, install the package (models included) 
 pip install "git+https://github.com/trx09009/RevORCHP-SM-1.0.2"
 ```
 
-It provides the `revorchp_sm` package (e.g. `from revorchp_sm.hp_offdesign_surrogate_1mw_filtered_variants_vopt6 import predict_1mw_hp_performance`) and the commands `revorchp-sm-design`, `revorchp-sm-hp-offdesign` and `revorchp-sm-orc-offdesign`, which take the same options as the scripts below.
+It provides the `revorchp_sm` package (e.g. `from revorchp_sm.hp_offdesign_surrogate_1mw_filtered_variants_vopt6 import predict_1mw_hp_performance`).
 
 ## Design commands
 
