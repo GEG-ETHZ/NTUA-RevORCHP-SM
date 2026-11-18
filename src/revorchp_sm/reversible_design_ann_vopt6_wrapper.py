@@ -76,8 +76,9 @@ def scale_installed_outputs(module: dict[str, Any], module_count: int) -> dict[s
     Parameters
     ----------
     module : dict
-        Per-module design outputs (``"module_design"`` of
-        ``DesignANNModule.predict_one``).
+        Per-module design outputs, for example ``"module_design"`` of
+        ``DesignANNModule.predict_one``, or one row of
+        ``DesignANNModule.predict_frame`` as a dict of floats.
     module_count : int
         Number of identical modules.
 

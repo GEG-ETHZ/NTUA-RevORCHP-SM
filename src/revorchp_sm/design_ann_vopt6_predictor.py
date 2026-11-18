@@ -13,7 +13,9 @@ from several modules.
 Declared design domain (README.md; also stored in the bundle as
 ``input_bounds``): ``target_load_W`` 500000–1e6, ``avg_T_amb_C`` -10–20,
 ``T_brine_in_C`` 95–115, ``p_brine_bar`` 12–24, ``T_brine_out_min_C`` 60–75.
-Inputs outside it are still evaluated and reported in ``warnings``.
+Inputs outside it are evaluated and reported in ``warnings`` when the input
+checks pass; some raise ``ValueError`` instead, for example a temperature
+outside the range of the saturation-pressure approximation.
 """
 from __future__ import annotations
 import argparse
@@ -366,8 +368,10 @@ class DesignANNModule:
         -------
         pandas.DataFrame
             One row per case with the bundle's ``report_output_columns``.
-            Column names end in their unit (``_W``, ``_C``, ``_bar``,
-            ``_kg_s``, ``_m3rev``, ``_m2``, ``_W_K``). Frequently used ones:
+            Most column names end in their unit (``_W``, ``_C``, ``_bar``,
+            ``_kg_s``, ``_m3rev``, ``_m2``, ``_W_K``); dimensionless ones,
+            such as ``hp_COP_heating`` and ``orc_eta_net``, have no unit
+            suffix. Frequently used ones:
 
             - ``hp_Q_cond_W``, ``hp_W_comp_W``, ``hp_COP_heating``,
               ``hp_unmet_load_W``, ``hp_load_coverage_fraction``

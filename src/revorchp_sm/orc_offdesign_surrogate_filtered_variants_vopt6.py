@@ -16,7 +16,8 @@ command").
 
 Training domain (README.md):
 
-- one stage: ``T_amb_C`` -11.9–34.8, ``T_brine_in_C`` 95–115,
+- one stage: ``T_amb_C`` -11.9–34.8 (the one-stage bundle's
+  ``input_bounds_filtered`` stores -15.2–34.8), ``T_brine_in_C`` 95–115,
   ``p_brine_bar`` 12–24, ``T_brine_out_min_C`` 60–75,
   ``m_brine_max_kg_s`` 3–8 (operation at the nominal 10 kg/s is outside the
   validated flow domain);
@@ -63,7 +64,8 @@ def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
         Copy of ``df`` with ``source_deltaT_available_K`` (K),
         ``brine_minus_ambient_K`` (K), ``brine_out_min_minus_ambient_K`` (K),
         ``geo_capacity_proxy_W`` (= ``m_brine_max_kg_s *
-        source_deltaT_available_K``, in kg K/s despite its name),
+        source_deltaT_available_K``, in kg K/s; multiplied by a heat capacity it
+        gives W, as in ``Q_geo_avail_est_W``),
         ``Q_geo_avail_est_W`` (= 4180 * ``geo_capacity_proxy_W``, W) and
         ``ambient_abs_C`` (absolute value of ``T_amb_C``).
     """
