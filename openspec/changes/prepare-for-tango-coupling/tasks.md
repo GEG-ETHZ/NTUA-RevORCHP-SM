@@ -29,6 +29,12 @@ Each item is a separate pull request, so it can be reviewed on its own. Owners a
 
 - [ ] 5.1 Export the neural networks as arrays and the boosted model as ONNX, with a loader. Verify equal results at every reference point.
 
-## 6. Release
+## 6. Detailed model
 
-- [ ] 6.1 Tag a release (for example 1.1.0) once the agreed items are merged, so TANGO can depend on it.
+- [ ] 6.1 Agree where the detailed model lives and its licence.
+- [ ] 6.2 Apply items 1 to 3 to it (reference-output tests, an installable package with agreed pins including CoolProp, docstrings), with CI on Linux and Windows.
+- [ ] 6.3 A batch interface with the same inputs, outputs and status values as the surrogate's (item 4), so TANGO can use either.
+
+## 7. Release
+
+- [ ] 7.1 Tag a release (for example 1.1.0) once the agreed items are merged, so TANGO can depend on it.

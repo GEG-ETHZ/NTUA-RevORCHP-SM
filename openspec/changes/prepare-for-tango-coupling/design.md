@@ -56,8 +56,8 @@ About the models:
 About the coupling:
 
 9. Who should decide between ORC and heat-pump operation at each hour: the plant model, TANGO, or a dispatch model?
-10. TANGO's wells can deliver brine outside the trained ranges (95 to 115 °C for the ORC, 55 to 75 °C for the heat pump). Should TANGO treat such points as infeasible, and could the ranges be widened in a later version?
+10. TANGO's wells can deliver brine outside the trained ranges (95 to 115 °C for the ORC, 55 to 75 °C for the heat pump). Answered 2026-11-18: flag such points, never clip them, and evaluate them with the detailed model where possible. Still open: could the ranges be widened in a later version?
 11. For plants of several MW, is it right to sum identical 1 MW modules?
 12. Are there cost data per module (investment, operation and maintenance) consistent with the model?
-13. Can the detailed model be shared, in which language and tools, under which licence, and how long does one off-design point take?
+13. Partly answered 2026-11-18: the detailed model is Python with CoolProp, accepts batches of hourly inputs, can size the hardware within the machine limits, and takes about 50 s per design, 0.04 to 0.6 s per hourly heat-pump point and 1.2 to 4.5 s per hourly ORC point. An updated version is to be shared by the meeting of 2026-11-20. Still open: where it will live (this repository or its own), its licence, Linux support, and pinned versions, including CoolProp (TANGO uses 6.8.0).
 14. Would you like to keep the `openspec/` folder (these documents) in the repository, or would you rather we keep this discussion in a pull request or an issue?
