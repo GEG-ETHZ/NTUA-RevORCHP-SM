@@ -60,6 +60,12 @@ About the coupling:
 9. Who should decide between ORC and heat-pump operation at each hour: the plant model, TANGO, or a dispatch model?
 10. TANGO's wells can deliver brine outside the trained ranges (95 to 115 °C for the ORC, 55 to 75 °C for the heat pump). Answered 2026-11-18: flag such points, never clip them, and evaluate them with the detailed model where possible. Still open: could the ranges be widened in a later version?
 11. For plants of several MW, is it right to sum identical 1 MW modules?
-12. Are there cost data per module (investment, operation and maintenance) consistent with the model?
+12. Plant cost. TANGO reports a levelized cost of electricity or heat, so it needs the plant's investment and operating costs, consistent with your model. TANGO's own ORC is costed from its equipment (turbine, pumps, coolers) with published cost correlations; for the reversible plant we do not know the right basis yet.
+    - Do you have cost data or correlations per module, or per piece of equipment (expander/compressor, heat exchangers, air-cooled condenser, pumps)?
+    - The design outputs include sizes (displacements, areas, UA values). Should costs be computed from these, and with which correlations?
+    - When the detailed model sizes the hardware for given conditions, can it report the equipment sizes so the same costing applies?
+    - Which currency and cost year do your data refer to, and from which sources?
+    - Is operation and maintenance a fraction of the investment, or itemized?
+    - Does switching between ORC and heat-pump operation add costs (wear, start-ups) that should be counted?
 13. Partly answered 2026-11-18: the detailed model is Python with CoolProp, accepts batches of hourly inputs, can size the hardware within the machine limits, and takes about 50 s per design, 0.04 to 0.6 s per hourly heat-pump point and 1.2 to 4.5 s per hourly ORC point. An updated version is to be shared by the meeting of 2026-11-20. Still open: where it will live (this repository or its own), its licence, Linux support, and pinned versions, including CoolProp (TANGO uses 6.8.0).
 14. Would you like to keep the `openspec/` folder (these documents) in the repository, or would you rather we keep this discussion in a pull request or an issue?
