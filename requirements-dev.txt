@@ -1,0 +1,2 @@
+# Tools for running the tests (see tests/). Not needed to use the models.
+pytest==9.2.0
