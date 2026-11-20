@@ -32,15 +32,16 @@ The exported files sit next to the `.joblib` files, and a test checks that both 
 
 ## Who does what
 
-To agree with the authors. The TANGO team has drafted items 1 to 3 as pull requests.
+Agreed in the call of 2026-11-20: the authors review the drafted pull requests (items 1 to 3) and implement the changes in their repository, using the drafts as a starting point. Items 4 and 5 are discussed as that work proceeds.
 
-| Item | Proposed | Agreed |
+| Item | Proposed | Agreed (2026-11-20) |
 |---|---|---|
-| 1. Regression tests and CI | TANGO team (drafted) | |
-| 2. Installable package | TANGO team (drafted) | |
-| 3. Docstrings | TANGO team (drafted); authors check the physics descriptions | |
-| 4. Program-friendly interface | open | |
-| 5. Portable model files | open | |
+| 1. Regression tests and CI | TANGO team (drafted) | Authors implement, from the draft |
+| 2. Installable package | TANGO team (drafted) | Authors implement, from the draft |
+| 3. Docstrings | TANGO team (drafted); authors check the physics descriptions | Authors implement, from the draft |
+| 4. Program-friendly interface | open | open |
+| 5. Portable model files | open | open |
+| Plant cost models (question 12) | open | Authors provide |
 
 ## Open Questions
 
@@ -57,10 +58,10 @@ About the models:
 
 About the coupling:
 
-9. Who should decide between ORC and heat-pump operation at each hour: the plant model, TANGO, or a dispatch model?
+9. Who should decide between ORC and heat-pump operation at each hour: the plant model, TANGO, or a dispatch model? Answered 2026-11-20: TANGO decides, informed by the district-heating dispatch model once it is coupled. Until then, the authors' model of a dummy thermal load stands in for the demand.
 10. TANGO's wells can deliver brine outside the trained ranges (95 to 115 °C for the ORC, 55 to 75 °C for the heat pump). Answered 2026-11-18: flag such points, never clip them, and evaluate them with the detailed model where possible. Still open: could the ranges be widened in a later version?
 11. For plants of several MW, is it right to sum identical 1 MW modules?
-12. Plant cost. TANGO reports a levelized cost of electricity or heat, so it needs the plant's investment and operating costs, consistent with your model. TANGO's own ORC is costed from its equipment (turbine, pumps, coolers) with published cost correlations; for the reversible plant we do not know the right basis yet.
+12. Answered in principle 2026-11-20: the authors will provide plant cost models; the details below remain to settle with them. Plant cost. TANGO reports a levelized cost of electricity or heat, so it needs the plant's investment and operating costs, consistent with your model. TANGO's own ORC is costed from its equipment (turbine, pumps, coolers) with published cost correlations; for the reversible plant we do not know the right basis yet.
     - Do you have cost data or correlations per module, or per piece of equipment (expander/compressor, heat exchangers, air-cooled condenser, pumps)?
     - The design outputs include sizes (displacements, areas, UA values). Should costs be computed from these, and with which correlations?
     - When the detailed model sizes the hardware for given conditions, can it report the equipment sizes so the same costing applies?
